@@ -7,4 +7,4 @@ Goal: no more carefully clicking 300 checkboxes in the browser. Fill in the spre
 
 - Python: https://www.python.org/downloads/
 - Chromedriver: https://googlechromelabs.github.io/chrome-for-testing/
-- Libraries: `pip install selenium, pandas, numpy, requests`
+- Libraries: `pip install selenium pandas numpy requests`
