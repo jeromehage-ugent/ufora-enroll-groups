@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 
 from selenium import webdriver
-from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.chrome.service import Service
@@ -13,14 +13,62 @@ from selenium.webdriver.common.by import By
 # general config
 host = 'https://ufora.ugent.be'
 orgUnitId = 1025023
-groupCategoryId = 170328 # you need to first create the group category manually
+
+sort_group_names = True
 
 # input file
 grouplist_path = 'GroupList.xlsx'
-grouplist_col = 'Group' # column in spreadsheet with the group name
+student_id_col = 0
+
+def group_category_formatter(header):
+    """Runs over column headers. Replace with your own."""
+    # skip these columns
+    skip = ['naam', 'name', 'voornaam', 'first name', 'last name', 'uuid']
+    if header.lower().strip() in skip:
+        return None
+    grp_category = 'test_{}_4'.format(header)
+    return grp_category
+
+def group_name_formatter(value):
+    """Runs over column values. Replace with your own."""
+    grp_name = '{}{}'.format(value[0], value[-1])
+    return grp_name
 
 
-#### BEGIN
+
+## BEGIN
+
+# read grouplist spreadsheet
+print('process group list')
+grouplist = pd.read_excel(grouplist_path)
+
+# rename student ID column to OrgDefinedId
+sid_col = grouplist.columns[student_id_col]
+grouplist.rename({sid_col: 'OrgDefinedId'}, axis = 1, inplace = True)
+grouplist['OrgDefinedId'] = grouplist['OrgDefinedId'].astype(np.int64)
+
+# convert column headers to group category names
+renamer = {c: group_category_formatter(c) for c in grouplist.columns if c != 'OrgDefinedId'}
+todrop = [c for c, new_c in renamer.items() if new_c is None]
+grouplist.drop(todrop, axis = 1, inplace = True)
+renamer = {c: new_c for c, new_c in renamer.items() if new_c is not None}
+grouplist.rename(renamer, axis = 1, inplace = True)
+gc_names = list(renamer.values()) # group category names
+
+# convert cell values to group names
+for gc in gc_names:
+    grouplist[gc] = grouplist[gc].apply(group_name_formatter)
+
+# get number of groups in each category
+gc_values = {gc: grouplist[gc].unique() for gc in gc_names}
+if sort_group_names:
+    for gc, gcv in gc_values.items():
+        gc_values[gc] = np.sort(gc_values[gc])
+gc_count = {gc: len(v) for gc, v in gc_values.items()}
+
+
+
+## web automation setup
 
 service = Service('chromedriver.exe') # download an updated version of this
 options = Options()
@@ -28,13 +76,13 @@ options.add_argument('start-maximized')
 driver = webdriver.Chrome(service = service, options = options)
 action = ActionChains(driver)
 
-## ufora login
+# ufora login
 print('ufora login')
 
 url = 'https://ufora.ugent.be/d2l/home/{}'.format(orgUnitId)
 driver.get(url)
 
-## get session cookies
+# get session cookies
 print('get session cookies')
 
 # used later to read data using API GET requests
@@ -49,9 +97,10 @@ for c in cookies:
     cookies[c] = v
 
 
-### get data from ufora API
 
-## check API version
+## API setup
+
+# check API version
 print('check API version')
 
 path = '/d2l/api/versions/'
@@ -66,92 +115,132 @@ for d in data:
     if d['ProductCode'] == 'lp':
         lp_version = d['LatestVersion']
 
-## get class list from ufora
-print('get class list from ufora')
-
-params = {
-    'version': le_version,
-    'orgUnitId': orgUnitId,
-    }
-path = '/d2l/api/le/{version}/{orgUnitId}/classlist/'
-url = host + path.format(**params)
-
-query_params = {
-    'onlyShowShownInGrades': 'true', # doesn't work
-    }
-if len(query_params) > 0:
-    url += '?' + '&'.join(['{}={}'.format(k, v) for k, v in query_params.items()])
-
-r = requests.request(
-    'GET', url,
-    cookies = cookies,
-    )
-data = r.json()
-
-classlist = pd.DataFrame(data)
-
-## get list of groups in category
-print('get list of groups in category')
-
-params = {
-    'version': lp_version,
-    'orgUnitId': orgUnitId,
-    'groupCategoryId': groupCategoryId,
-    }
-path = '/d2l/api/lp/{version}/{orgUnitId}/groupcategories/{groupCategoryId}/groups/'
-url = host + path.format(**params)
-
-r = requests.request(
-    'GET', url,
-    cookies = cookies,
-    )
-data = r.json()
-
-groups = pd.DataFrame(data)
-
-### data processing
-
-classlist['Identifier'] = classlist['Identifier'].astype(np.int64)
-classlist['OrgDefinedId'] = classlist['OrgDefinedId'].astype(np.int64)
-
-## read target group list from the file and merge
-print('read target group list from the file and merge')
-
-col = grouplist_col
-
-grouplist = pd.read_excel(grouplist_path)
-grouplist['grp'] = grouplist.loc[grouplist[col].notna(), col].astype(np.int64)
-grouplist.dropna(subset = 'grp', inplace = True)
-grouplist['OrgDefinedId'] = grouplist['OrgDefinedId'].astype(np.int64)
-grouplist = grouplist[['OrgDefinedId', 'grp']]
-
-classlist = pd.merge(classlist, grouplist, on = 'OrgDefinedId', how = 'inner')
-
-# converts 'Group 3' to 3
-def fixname(s):
-    return int(s.split(' ')[-1])
-
-groups['grp'] = groups['Name'].apply(fixname)
-groups = groups[['grp', 'GroupId']]
-
-classlist = pd.merge(classlist, groups, on = 'grp', how = 'inner')
-
-
-### web automation
-
-## enrolling students
-print('enrolling students')
-
-path = 'https://ufora.ugent.be/d2l/lms/group/group_enroll.d2l?ou={orgUnitId}&categoryId={groupCategoryId}'
-params = {
-    'orgUnitId': orgUnitId,
-    'groupCategoryId': groupCategoryId,
-    }
-url = path.format(**params)
-driver.get(url)
-
-def click_all_checkboxes():
+def api_get_classlist():
     
+    params = {
+        'version': le_version,
+        'orgUnitId': orgUnitId,
+        }
+    path = '/d2l/api/le/{version}/{orgUnitId}/classlist/'
+    url = host + path.format(**params)
+
+    r = requests.request(
+        'GET', url,
+        cookies = cookies,
+        )
+    data = r.json()
+
+    return pd.DataFrame(data)
+
+def api_get_group_list(groupCategoryId):
+    
+    params = {
+        'version': lp_version,
+        'orgUnitId': orgUnitId,
+        'groupCategoryId': groupCategoryId,
+        }
+    path = '/d2l/api/lp/{version}/{orgUnitId}/groupcategories/{groupCategoryId}/groups/'
+    url = host + path.format(**params)
+
+    r = requests.request(
+        'GET', url,
+        cookies = cookies,
+        )
+    data = r.json()
+
+    return pd.DataFrame(data)
+
+
+
+## create group categories
+print('create group categories and groups')
+
+def waitfor_checkbox_visible():
+    # wait until page is loaded
+    checkbox_show = EC.presence_of_element_located((By.CLASS_NAME, 'd2l-checkbox'))
+    WebDriverWait(driver, timeout = 120).until(checkbox_show)
+
+def set_group_category_name(name):
+    """looks for the edit box that has 'name' as its name"""
+    editboxes = driver.find_elements(By.CLASS_NAME, 'd2l-edit')
+    gcn_box = [e for e in editboxes if e.get_attribute('name') == 'name'][0]
+    #ActionChains(driver).move_to_element(inputbox).click(inputbox).send_keys(name).perform()
+    gcn_box.clear()
+    gcn_box.send_keys(name)
+    
+def set_group_category_count(count):
+    """looks for the input box that has 'gr' in its label (as in group or gropen"""
+    inputboxes = driver.find_elements(By.CLASS_NAME, 'd2l-input-number-wc')
+    gcc_box = [e for e in inputboxes if 'gr' in e.get_attribute('label')][0]
+    gcc_box.send_keys(count)
+
+def click_save():
+    """looks for the button with the text 'save' or 'opslaan'"""
+    save = ['save', 'opslaan']
+    buttons = driver.find_elements(By.CLASS_NAME, 'd2l-button')
+    save_button = [e for e in buttons if e.text.lower() in save][0]
+    save_button.click()
+
+def click_save_OK():
+    """looks for the button with the text 'save' or 'opslaan', clicks pops"""
+    save = ['save', 'opslaan']
+    buttons = driver.find_elements(By.CLASS_NAME, 'd2l-button')
+    save_button = [e for e in buttons if e.text.lower() in save][0]
+    save_button.click()
+    # wait for any confirmation checkboxes
+    ok_button_show = EC.presence_of_element_located((By.CLASS_NAME, 'd2l-dialog-buttons'))
+    WebDriverWait(driver, timeout = 10).until(ok_button_show)
+    ok_button_clickable = EC.element_to_be_clickable((By.CLASS_NAME, 'd2l-dialog-buttons'))
+    ok_button_box = WebDriverWait(driver, timeout = 10).until(ok_button_clickable)
+    ok_button = ok_button_box.find_element(By.CLASS_NAME, 'd2l-button')
+    ok_button.click()
+
+def set_group_name(name):
+    """same behavior as set_group_category_name"""
+    set_group_category_name(name)
+
+gc_ids = {}
+for gc, count in gc_count.items():
+    # go to group category create page
+    url = 'https://ufora.ugent.be/d2l/lms/group/category_newedit.d2l?ou={}'.format(orgUnitId)
+    driver.get(url)
+    # wait until page is loaded
+    editbox_clickable = EC.element_to_be_clickable((By.CLASS_NAME, 'd2l-edit'))
+    WebDriverWait(driver, timeout = 120).until(editbox_clickable)
+    # set name and count
+    set_group_category_name(gc)
+    set_group_category_count(count)
+    # save and wait until group page is loaded
+    click_save_OK()
+    waitfor_checkbox_visible()
+    # extract group category ID from url
+    # Note: we could also just make all the groups and read the list of group categories later
+    gcid = driver.current_url.split('categoryId=')[1].split('&')[0]
+    gc_ids[gc] = gcid
+    print('Created group category', gc, gcid)
+
+    # read group ids in group category with API
+    group_ids = api_get_group_list(gcid)['GroupId'].values
+    for gid, gn in zip(group_ids, gc_values[gc]):
+        # go to group edit page
+        url = 'https://ufora.ugent.be/d2l/lms/group/group_edit.d2l?ou={}&groupId={}'.format(orgUnitId, gid)
+        driver.get(url)
+        # wait until page is loaded
+        editbox_clickable = EC.element_to_be_clickable((By.CLASS_NAME, 'd2l-edit'))
+        WebDriverWait(driver, timeout = 120).until(editbox_clickable)
+        # set group name and save
+        set_group_name(gn)
+        click_save()
+        # wait for the page to load
+        waitfor_checkbox_visible()
+    
+
+
+## enroll students
+
+def click_all_checkboxes(students):
+    """clicks all the appropriate (GroupID, OrgDefinedId) checkboxes"""
+
     # get the list of all checkboxes
     checkboxes = driver.find_elements(By.CLASS_NAME, 'd2l-checkbox')
     enrol_cbx = {}
@@ -165,41 +254,113 @@ def click_all_checkboxes():
             enrol_cbx[k] = cbx
 
     # enroll users in groups by clicking the right checkboxes
-    for idx, student in classlist.iterrows():
-        groupId = student['GroupId']
-        Identifier = student['Identifier']
-        key = '{},{}'.format(groupId, Identifier)
+    for idx, student in students.iterrows():
+        key = '{},{}'.format(student['GroupId'], student['Identifier'])
         if key in enrol_cbx:
             cbx = enrol_cbx[key]
             #action.move_to_element(cbx).perform()
             #clickable = WebDriverWait(driver, 10).until(EC.element_to_be_clickable(cbx))
             #clickable.click()
             driver.execute_script('arguments[0].click();', cbx)
-            classlist.loc[idx, 'clicked'] = True
+            students.loc[idx, 'clicked'] = True
 
-while True:
-    # wait until page is loaded
-    checkbox_show = EC.presence_of_element_located((By.CLASS_NAME, 'd2l-checkbox'))
-    WebDriverWait(driver, timeout = 120).until(checkbox_show)
-    # enroll users
-    click_all_checkboxes()
-    # scroll to the bottom
-    driver.execute_script('window.scrollTo(0, document.body.scrollHeight);')
-    # click the next button
-    buttons = driver.find_elements(By.TAG_NAME, 'd2l-button-icon')
-    b_icons = [b.get_attribute('icon') for b in buttons]
-    if 'tier1:chevron-right' in b_icons:
-        b_next = buttons[b_icons.index('tier1:chevron-right')]
-        b_next.click()
+def pages_find_selectors():
+    """look for page selector element containing '1 of' or '1 van'"""
+    selectors = driver.find_elements(By.CLASS_NAME, 'd2l-select')
+    of = ['of', 'van']
+    page_selectors = [s for s in selectors if any(['1 {}'.format(o) in s.text for o in of])]
+    return page_selectors
+
+def pages_get_count():
+    """check how many pages can be selected"""
+    selectors = pages_find_selectors()
+    if len(selectors) == 0:
+        # no page selector means a single page
+        return 1
     else:
-        break
+        select = Select(selectors[0])
+        return len(select.options)
 
-print('ENROLLED', classlist['clicked'].sum(), '/', len(classlist))
+def pages_goto(page_nb = 1):
+    """click page selector option by index"""
+    selectors = pages_find_selectors()
+    if len(selectors) != 0:
+        select = Select(selectors[0])
+        select.select_by_index(page_nb - 1)
 
-missed = classlist[classlist['clicked'] == False]
-if len(missed) > 0:
-    print('Missing:')
-    for idx, student in missed.iterrows():
-        print(student['Identifier'], student['DisplayName'])
+def pages_get_current():
+    """get index of current selected page"""
+    selectors = pages_find_selectors()
+    if len(selectors) != 0:
+        select = Select(selectors[0])
+        return select.options.index(select.first_selected_option) + 1
 
-classlist.to_csv('classlist.csv')
+
+# get class list from ufora
+print('get class list from ufora')
+classlist = api_get_classlist()
+classlist['Identifier'] = classlist['Identifier'].astype(np.int64)
+classlist['OrgDefinedId'] = classlist['OrgDefinedId'].astype(np.int64)
+
+# get list of groups in category
+print('get list of groups in category')
+for gc, gcid in gc_ids.items():
+    groups = api_get_group_list(gcid)
+    groups = groups[['Name', 'GroupId']]
+    # get list of students in this group category
+    gc_students = grouplist.loc[grouplist[gc].notna(), ['OrgDefinedId', gc]]
+    merged = pd.merge(groups, gc_students, left_on = 'Name', right_on = gc, how = 'outer')
+    gc_students = merged[['OrgDefinedId', 'GroupId']]
+    # add internal Identifier along with OrgDefinedId
+    gc_student_list = pd.merge(classlist, gc_students, on = 'OrgDefinedId', how = 'inner')
+
+    # enrolling students
+    print('enrolling students in', gc)
+
+    # go to enrolling students page
+    url = 'https://ufora.ugent.be/d2l/lms/group/group_enroll.d2l?ou={}&categoryId={}'.format(orgUnitId, gcid)
+    driver.get(url)
+    # wait until page is loaded
+    waitfor_checkbox_visible()
+
+    pages_visited = []
+    while True:
+        # select all the correct checkboxes
+        click_all_checkboxes(gc_student_list)
+        # scroll to the bottom
+        driver.execute_script('window.scrollTo(0, document.body.scrollHeight);')
+
+        # check for multiple pages
+        page_cnt = pages_get_count()
+        if page_cnt == 1:
+            click_save()
+            waitfor_checkbox_visible()
+            break
+        else:
+            pages_visited += [pages_get_current()]
+            print(pages_visited)
+            if len(np.unique(pages_visited)) == page_cnt:
+                click_save()
+                waitfor_checkbox_visible()
+                break
+            else:
+                # below is kind of a stupid workflow but unfortunately you have to save on every page
+                click_save()
+                waitfor_checkbox_visible()
+                # go back to previous page
+                driver.execute_script('window.history.go(-1)')
+                waitfor_checkbox_visible()
+                # select another page
+                not_visited = [i + 1 for i in range(page_cnt) if i + 1 not in pages_visited]
+                pages_goto(not_visited[0])
+                waitfor_checkbox_visible()
+
+    print('ENROLLED', gc_student_list['clicked'].sum(), '/', len(gc_student_list))
+
+    missed = gc_student_list[gc_student_list['clicked'] == False]
+    if len(missed) > 0:
+        print('Category', gc, gcid, 'missing:')
+        for idx, student in missed.iterrows():
+            print(student['Identifier'], student['DisplayName'])
+
+    gc_student_list.to_csv('students_{}.csv'.format(gcid))
