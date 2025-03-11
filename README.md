@@ -22,4 +22,4 @@ https://googlechromelabs.github.io/chrome-for-testing/
 `pip install selenium, pandas, numpy, requests`
 
 ## Demo
-(outdated)[demo.mp4]
+(outdated) ![demo.mp4](https://github.com/jeromehage-ugent/ufora-enroll-groups/raw/refs/heads/master/demo.mp4)
