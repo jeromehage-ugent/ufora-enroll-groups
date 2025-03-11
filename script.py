@@ -14,11 +14,11 @@ from selenium.webdriver.common.by import By
 host = 'https://ufora.ugent.be'
 orgUnitId = 1025023
 
-sort_group_names = True
+sort_group_names = True # create groups in alphabetical order
 
 # input file
 grouplist_path = 'GroupList.xlsx'
-student_id_col = 0
+student_id_col = 0 # first column
 
 def group_category_formatter(header):
     """Runs over column headers. Replace with your own."""
@@ -26,12 +26,12 @@ def group_category_formatter(header):
     skip = ['naam', 'name', 'voornaam', 'first name', 'last name', 'uuid']
     if header.lower().strip() in skip:
         return None
-    grp_category = 'test_{}_4'.format(header)
+    grp_category = 'test_{}'.format(header)
     return grp_category
 
 def group_name_formatter(value):
     """Runs over column values. Replace with your own."""
-    grp_name = '{}{}'.format(value[0], value[-1])
+    grp_name = 'grp_{}'.format(value)
     return grp_name
 
 
