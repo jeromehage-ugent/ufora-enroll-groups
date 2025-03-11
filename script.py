@@ -10,7 +10,18 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 
-# general config
+def fix_pandas_float_to_int(value):
+    # fix pandas sometimes converting integers to floats
+    try:
+        value = float(value)
+        if int(value) == value:
+            value = int(value)
+    except (ValueError, TypeError):
+        pass
+    return value
+
+
+## general config
 host = 'https://ufora.ugent.be'
 orgUnitId = 1025023
 
@@ -31,6 +42,9 @@ def group_category_formatter(header):
 
 def group_name_formatter(value):
     """Runs over column values. Replace with your own."""
+    if pd.isna(value):
+        return value
+    value = fix_pandas_float_to_int(value)
     grp_name = 'grp_{}'.format(value)
     return grp_name
 
@@ -45,6 +59,7 @@ grouplist = pd.read_excel(grouplist_path)
 # rename student ID column to OrgDefinedId
 sid_col = grouplist.columns[student_id_col]
 grouplist.rename({sid_col: 'OrgDefinedId'}, axis = 1, inplace = True)
+grouplist = grouplist[grouplist['OrgDefinedId'].notna()]
 grouplist['OrgDefinedId'] = grouplist['OrgDefinedId'].astype(np.int64)
 
 # convert column headers to group category names
@@ -60,11 +75,14 @@ for gc in gc_names:
     grouplist[gc] = grouplist[gc].apply(group_name_formatter)
 
 # get number of groups in each category
-gc_values = {gc: grouplist[gc].unique() for gc in gc_names}
-if sort_group_names:
-    for gc, gcv in gc_values.items():
-        gc_values[gc] = np.sort(gc_values[gc])
-gc_count = {gc: len(v) for gc, v in gc_values.items()}
+gc_values = {}
+gc_count = {}
+for gc in gc_names:
+    gc_vals = grouplist[gc].dropna().unique().tolist()
+    if sort_group_names:
+        gc_vals = sorted(gc_vals)
+    gc_values[gc] = gc_vals
+    gc_count[gc] = len(gc_vals)
 
 
 
@@ -73,6 +91,7 @@ gc_count = {gc: len(v) for gc, v in gc_values.items()}
 service = Service('chromedriver.exe') # download an updated version of this
 options = Options()
 options.add_argument('start-maximized')
+options.add_experimental_option('excludeSwitches', ['enable-logging'])
 driver = webdriver.Chrome(service = service, options = options)
 action = ActionChains(driver)
 
@@ -295,6 +314,16 @@ def pages_get_current():
         select = Select(selectors[0])
         return select.options.index(select.first_selected_option) + 1
 
+def perpage_pick_highest():
+    """look for page selector element containing '1 of' or '1 van'"""
+    selectors = driver.find_elements(By.CLASS_NAME, 'd2l-select')
+    perpage_selector = [s for s in selectors if 'per pag' in s.text][0]
+    select = Select(perpage_selector)
+    nperpage = [int(o.text.split(' per pag')[0]) for o in select.options]
+    select.select_by_index(np.argmax(nperpage))
+
+
+
 
 # get class list from ufora
 print('get class list from ufora')
@@ -321,6 +350,9 @@ for gc, gcid in gc_ids.items():
     url = 'https://ufora.ugent.be/d2l/lms/group/group_enroll.d2l?ou={}&categoryId={}'.format(orgUnitId, gcid)
     driver.get(url)
     # wait until page is loaded
+    waitfor_checkbox_visible()
+    # pick most students per page
+    perpage_pick_highest()
     waitfor_checkbox_visible()
 
     pages_visited = []
@@ -364,3 +396,5 @@ for gc, gcid in gc_ids.items():
             print(student['Identifier'], student['DisplayName'])
 
     gc_student_list.to_csv('students_{}.csv'.format(gcid))
+
+input('Done, press enter to leave :-)')
